@@ -1,2 +1,2 @@
-# oxide_ircd
+# Oxide IRCd
 Rust-based IRC server implementation
