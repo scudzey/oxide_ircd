@@ -1,12 +1,12 @@
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::instrument;
+use super::client::Client;
+use super::command::Command;
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use super::command::Command;
-use super::client::Client;
-use rand::Rng;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, RwLock};
+use tracing::instrument;
 
 #[derive(Debug)]
 pub struct ServerState {
@@ -34,12 +34,10 @@ impl ServerState {
 
 #[derive(Debug)]
 pub struct ClientHandle {
-    pub sender: mpsc::UnboundedSender<String>
+    pub sender: mpsc::UnboundedSender<String>,
 }
 
 pub type SharedServerState = Arc<ServerState>;
-
-
 
 #[instrument]
 pub async fn run(listener: TcpListener) -> Result<(), Box<dyn std::error::Error>> {
@@ -62,18 +60,18 @@ pub async fn run(listener: TcpListener) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-#[tracing::instrument(
-    name = "Handling client connection",
-    skip(socket)
-)]
-async fn handle_client(socket: TcpStream, server_state: SharedServerState) -> Result<(), Box<dyn std::error::Error>> {
+#[tracing::instrument(name = "Handling client connection", skip(socket))]
+async fn handle_client(
+    socket: TcpStream,
+    server_state: SharedServerState,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader).lines();
 
     let (client_tx, mut client_rx) = mpsc::unbounded_channel::<String>();
-    
+
     let nickname = format!("guest{}", rand::thread_rng().gen_range(1..=9999));
-    let mut session:Arc<RwLock<Client>> = Arc::new(RwLock::new(Client::new(nickname, client_tx)));
+    let session: Arc<RwLock<Client>> = Arc::new(RwLock::new(Client::new(nickname, client_tx)));
     let nickname = session.read().await.nick.clone().unwrap();
     server_state.add_client(nickname, &session).await;
 
@@ -84,10 +82,8 @@ async fn handle_client(socket: TcpStream, server_state: SharedServerState) -> Re
     });
 
     while let Ok(Some(line)) = reader.next_line().await {
-        // let parts: Vec<&str> = line.trim().split_whitespace().collect();
         let command = Command::parse(&line);
-
-        command.handle(&mut session, &server_state).await;
+        command.handle(&session, &server_state).await;
     }
 
     Ok(())

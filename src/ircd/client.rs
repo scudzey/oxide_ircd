@@ -3,7 +3,6 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::command::Command;
 
-
 #[derive(Eq, Hash, PartialEq, Debug, Clone)]
 pub enum Capability {
     MultiPrefix,
@@ -18,7 +17,6 @@ pub struct Client {
     pub capabilities: HashSet<Capability>,
     pub state: ClientState,
     pub sender: UnboundedSender<String>,
-
 }
 
 #[derive(Debug)]
@@ -28,32 +26,28 @@ pub enum ClientState {
     Authenticated,
 }
 
-
 impl Client {
-    pub fn new(nickname: String, sender: UnboundedSender<String> ) -> Self {
+    pub fn new(nickname: String, sender: UnboundedSender<String>) -> Self {
         Self {
             nick: Some(nickname.clone()),
             user: Some(nickname.clone()),
             capabilities: HashSet::new(),
             state: ClientState::Unregistered,
-            sender
+            sender,
         }
     }
 
-    #[tracing::instrument(
-        name = "Handling cap commands",
-    )]
+    #[tracing::instrument(name = "Handling cap commands")]
     pub fn handle_cap_command(&mut self, cmd: &Command) -> Option<String> {
         match cmd {
             Command::CapLs => {
-                let caps = vec!["multi-prefix", "sasl", "echo-message"].join(" ");
+                let caps = ["multi-prefix", "sasl", "echo-message"].join(" ");
                 tracing::debug!("Sending CAP * LS response");
                 Some(format!("CAP * LS :{}\r\n", caps))
             }
-        
 
             Command::CapReq(requested_caps) => {
-                let supported_caps = vec![":multi-prefix", ":sasl", ":echo-message"];
+                let supported_caps = [":multi-prefix", ":sasl", ":echo-message"];
                 let mut ack_caps = vec![];
 
                 for cap in requested_caps {
@@ -61,13 +55,13 @@ impl Client {
                         match cap.as_str() {
                             ":multi-prefix" => {
                                 self.capabilities.insert(Capability::MultiPrefix);
-                            },
+                            }
                             ":sasl" => {
                                 self.capabilities.insert(Capability::SASL);
-                            },
+                            }
                             ":echo-message" => {
                                 self.capabilities.insert(Capability::EchoMessage);
-                            },
+                            }
                             _ => {}
                         }
                         ack_caps.push(cap.clone());
@@ -85,10 +79,8 @@ impl Client {
                 self.state = ClientState::Registered;
                 None
             }
-            
-            _ => {
-                Some("CAP * NAK :Invalid command\r\n".to_string())
-            }
+
+            _ => Some("CAP * NAK :Invalid command\r\n".to_string()),
         }
     }
 }
