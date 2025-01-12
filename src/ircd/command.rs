@@ -2,7 +2,11 @@ use std::{collections::HashSet, sync::Arc};
 
 use tokio::sync::RwLock;
 
-use super::{client::Client, ircd::SharedServerState};
+use super::{
+    client::Client,
+    ircd::SharedServerState,
+    response::{ResponseCode, ResponseParams},
+};
 
 #[derive(Debug)]
 pub enum Command {
@@ -189,35 +193,39 @@ impl Command {
                     let channels = server_state.channels.read().await;
                     if let Some(users) = channels.get(channel) {
                         let user_list = users.iter().cloned().collect::<Vec<_>>().join(" ");
-                        let _ = active_session.sender.send(format!(
-                            ":server 353 {} = {} :{}\r\n",
-                            active_session.nick.as_ref().unwrap(),
-                            channel,
-                            user_list
-                        ));
-                        let _ = active_session.sender.send(format!(
-                            ":server 366 {} {} :End of /NAMES list\r\n",
-                            active_session.nick.as_ref().unwrap(),
-                            channel
-                        ));
+
+                        let params =
+                            ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
+                                .channel(channel.clone())
+                                .message(user_list.clone());
+
+                        let response = ResponseCode::RPL_NAMREPLY.message(params);
+                        let _ = active_session.sender.send(response);
+
+                        let params =
+                            ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
+                                .channel(channel.clone());
+                        let response = ResponseCode::RPL_ENDOFNAMES.message(params);
+                        let _ = active_session.sender.send(response);
                     }
                 } else {
                     let channels = server_state.channels.read().await;
                     for channel in channels.keys() {
                         let users = channels.get(channel).unwrap();
                         let user_list = users.iter().cloned().collect::<Vec<_>>().join(" ");
-                        let _ = active_session.sender.send(format!(
-                            ":server 353 {} = {} :{}\r\n",
-                            active_session.nick.as_ref().unwrap(),
-                            channel,
-                            user_list
-                        ));
+                        let params =
+                            ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
+                                .channel(channel.clone())
+                                .message(user_list.clone());
+
+                        let response = ResponseCode::RPL_NAMREPLY.message(params);
+                        let _ = active_session.sender.send(response);
                     }
 
-                    let _ = active_session.sender.send(format!(
-                        ":server 366 {} * :End of /NAMES list\r\n",
-                        active_session.nick.as_ref().unwrap()
-                    ));
+                    let params = ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
+                        .channel("*".to_string());
+                    let response = ResponseCode::RPL_ENDOFNAMES.message(params);
+                    let _ = active_session.sender.send(response);
                 }
             }
 
