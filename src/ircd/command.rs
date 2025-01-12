@@ -17,6 +17,7 @@ pub enum Command {
     NICK(String),
     USER(String),
     JOIN(String),
+    PART(String),
     PING(String),
     PRIVMSG(String, String),
     NAMES(Option<String>),
@@ -71,6 +72,14 @@ impl Command {
                 }
             }
 
+            Some(cmd) if cmd == "PART" => {
+                if let Some(channel) = parts.get(1) {
+                    Command::PART(channel.to_string())
+                } else {
+                    Command::Unknown(input.to_string())
+                }
+            }
+
             Some(cmd) if cmd == "PRIVMSG" => match (parts.get(1), parts.len() > 2) {
                 (Some(target), true) => {
                     let msg = parts[2..]
@@ -102,7 +111,11 @@ impl Command {
     }
 
     #[tracing::instrument(name = "Handling command operation")]
-    pub async fn handle(&self, session: &Arc<RwLock<Client>>, server_state: &SharedServerState) {
+    pub async fn handle(
+        &self,
+        session: &Arc<RwLock<Client>>,
+        server_state: &SharedServerState,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match self {
             Command::CapLs | Command::CapReq(_) | Command::CapEnd => {
                 let mut session = session.write().await;
@@ -110,6 +123,7 @@ impl Command {
                     tracing::debug!("Sending CAP response: {}", response);
                     let _ = session.sender.send(response);
                 }
+                Ok(true)
             }
 
             Command::NICK(nick) => {
@@ -140,7 +154,8 @@ impl Command {
                 let formatted_message = format!(":{} NICK {}\r\n", old_nick, new_nick);
                 let recipient_handles = {
                     let users = server_state.users.read().await;
-                    users.keys()
+                    users
+                        .keys()
                         .filter_map(|user| {
                             if user != &new_nick {
                                 users.get(user).map(Arc::clone)
@@ -154,26 +169,42 @@ impl Command {
                     let client = handle.write().await;
                     let _ = client.sender.send(formatted_message.clone());
                 }
-                
+                Ok(true)
             }
 
             Command::USER(user) => {
                 session.write().await.user = Some(user.clone());
+                Ok(true)
             }
 
             Command::JOIN(channel) => {
+                let parameters = channel.split_ascii_whitespace().collect::<Vec<_>>();
+
+                if parameters[0] == ":" {
+                    //return ERR_NEEDMOREPARAMS
+                    tracing::debug!("JOIN command missing channel parameter");
+                    let message = ResponseCode::ERR_NEEDMOREPARAMS.message(ResponseParams::new(
+                        session.read().await.nick.as_ref().unwrap().clone(),
+                    ));
+                    let _ = session.write().await.sender.send(message);
+                    return Ok(true);
+                }
+
                 let nickname = {
                     let active_session = session.read().await;
                     active_session.nick.as_ref().unwrap().clone()
                 };
 
-                tracing::debug!("User {} joining channel {}", nickname, channel);
                 
+
+                tracing::debug!("User {} joining channel {}", nickname, channel);
+
                 let channel_obj = {
                     let mut channels_lock = server_state.channels.write().await;
                     if let Some(channel) = channels_lock.get(channel) {
                         channel.clone()
-                    } else { //channel doesn't exist, create it
+                    } else {
+                        //channel doesn't exist, create it
                         let channel_obj = Arc::new(RwLock::new(Channel::new(channel.clone())));
                         channels_lock.insert(channel.clone(), channel_obj.clone());
                         channel_obj
@@ -181,7 +212,11 @@ impl Command {
                 };
                 tracing::debug!("found/created channel");
                 {
-                    channel_obj.write().await.users.insert(nickname.clone(), session.clone());
+                    channel_obj
+                        .write()
+                        .await
+                        .users
+                        .insert(nickname.clone(), session.clone());
                 }
                 tracing::debug!("added user to channel");
                 let channel_name = {
@@ -195,8 +230,8 @@ impl Command {
                 let _ = {
                     let active_session = session.read().await;
                     active_session
-                    .sender
-                    .send(format!(":{} JOIN {}\r\n", nickname, channel_name))
+                        .sender
+                        .send(format!(":{} JOIN {}\r\n", nickname, channel_name))
                 };
 
                 //Send Channel topic value to the user
@@ -247,7 +282,8 @@ impl Command {
                     let channel_lock = channel_obj.read().await;
                     let users = channel_lock.users.clone();
                     let users_lock = server_state.users.read().await;
-                    users.iter()
+                    users
+                        .iter()
                         .filter_map(|(user, _)| {
                             if user != &nickname {
                                 users_lock.get(user).map(Arc::clone)
@@ -261,6 +297,64 @@ impl Command {
                     let client = handle.write().await;
                     let _ = client.sender.send(formatted_message.clone());
                 }
+                Ok(true)
+            }
+
+            Command::PART(channel) => {
+                let nickname = {
+                    let active_session = session.read().await;
+                    active_session.nick.as_ref().unwrap().clone()
+                };
+
+                let channel_obj = {
+                    let channels_lock = server_state.channels.write().await;
+                    if let Some(channel) = channels_lock.get(channel) {
+                        Arc::clone(channel)
+                    } else {
+                        return Ok(true);
+                    }
+                };
+
+                let channel_name = {
+                    let channel_lock = channel_obj.read().await;
+                    channel_lock.name.clone()
+                };
+
+                {
+                    let mut channel_lock = channel_obj.write().await;
+                    channel_lock.users.remove(&nickname);
+                }
+
+                let formatted_message = format!(":{} PART {}\r\n", nickname, channel_name);
+
+                //Send PART message to user
+                let _ = {
+                    let active_session = session.read().await;
+                    active_session.sender.send(formatted_message.clone())
+                };
+
+                let recipient_handles: Vec<Arc<RwLock<Client>>> = {
+                    let channel_lock = channel_obj.read().await;
+                    let users = channel_lock.users.clone();
+                    let users_lock = server_state.users.read().await;
+                    users
+                        .keys()
+                        .filter_map(|user| {
+                            if user != &nickname {
+                                users_lock.get(user).map(Arc::clone)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+
+                for handle in recipient_handles {
+                    let client = handle.write().await;
+                    let _ = client.sender.send(formatted_message.clone());
+                }
+
+                Ok(true)
             }
 
             Command::PRIVMSG(target, message) => {
@@ -303,6 +397,7 @@ impl Command {
                     let client = recipient.write().await;
                     let _ = client.sender.send(formatted_message);
                 }
+                Ok(true)
             }
 
             Command::PING(token) => {
@@ -311,6 +406,7 @@ impl Command {
                     .await
                     .sender
                     .send(format!("PONG server {}\r\n", token));
+                Ok(true)
             }
 
             Command::NAMES(channel) => {
@@ -361,20 +457,22 @@ impl Command {
                     let response = ResponseCode::RPL_ENDOFNAMES.message(params);
                     let _ = active_session.sender.send(response);
                 }
+
+                Ok(true)
             }
 
             Command::QUIT => {
                 let active_session = session.write().await;
                 let nickname = active_session.nick.as_ref().unwrap();
-                let _ = session
-                    .write()
-                    .await
+                let _ = active_session
                     .sender
                     .send(format!(":{} QUIT\r\n", nickname));
+                Ok(false)
             }
 
             Command::Unknown(cmd) => {
                 tracing::info!("Unknown command: {}", cmd);
+                Ok(true)
             }
         }
     }

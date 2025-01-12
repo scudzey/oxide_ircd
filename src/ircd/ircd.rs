@@ -70,7 +70,7 @@ async fn handle_client(
     let nickname = format!("guest{}", rand::thread_rng().gen_range(1..=9999));
     let session: Arc<RwLock<Client>> = Arc::new(RwLock::new(Client::new(nickname, client_tx)));
     let nickname = session.read().await.nick.clone().unwrap();
-    server_state.add_client(nickname, &session).await;
+    server_state.add_client(nickname.clone(), &session).await;
 
     tokio::spawn(async move {
         while let Some(msg) = client_rx.recv().await {
@@ -80,8 +80,42 @@ async fn handle_client(
 
     while let Ok(Some(line)) = reader.next_line().await {
         let command = Command::parse(&line);
-        command.handle(&session, &server_state).await;
+        
+        match command.handle(&session, &server_state).await {
+            Ok(false) => break,
+            Ok(true) => continue,
+            Err(e) => {
+                tracing::error!("Error handling command: {:?}", e);
+                break;
+            }
+        }
     }
+
+    //cleanup client state and remove them from any channels
+    let nickname = session.read().await.nick.clone().unwrap();
+    tracing::info!("Client {} disconnected", nickname);
+    let client = server_state
+        .users
+        .write()
+        .await
+        .remove(&nickname.clone())
+        .unwrap();
+    let client: tokio::sync::RwLockReadGuard<'_, Client> = client.read().await;
+    tracing::info!("Removing client from channels");
+    for channel in server_state.channels.read().await.values() {
+        let mut channel = channel.write().await;
+        channel.users.remove(&client.nick.clone().unwrap());
+
+        //Send Quit message to users in the channel
+        let quit_msg = format!(
+            ":{} QUIT :Client exit STUB\r\n",
+            client.nick.clone().unwrap()
+        );
+        for user in channel.users.values() {
+            user.read().await.sender.send(quit_msg.clone()).unwrap();
+        }
+    }
+    tracing::info!("Client cleanup complete");
 
     Ok(())
 }
