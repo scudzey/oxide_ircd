@@ -1,8 +1,9 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
 use super::{
+    channel::Channel,
     client::Client,
     ircd::SharedServerState,
     response::{ResponseCode, ResponseParams},
@@ -134,9 +135,79 @@ impl Command {
                     let active_session = session.read().await;
                     active_session.nick.as_ref().unwrap().clone()
                 };
-                let mut channels = server_state.channels.write().await;
-                let users = channels.entry(channel.clone()).or_insert_with(HashSet::new);
-                users.insert(nickname.clone());
+
+                tracing::debug!("User {} joining channel {}", nickname, channel);
+                
+                let channel_obj = {
+                    let mut channels_lock = server_state.channels.write().await;
+                    if let Some(channel) = channels_lock.get(channel) {
+                        channel.clone()
+                    } else { //channel doesn't exist, create it
+                        let channel_obj = Arc::new(RwLock::new(Channel::new(channel.clone())));
+                        channels_lock.insert(channel.clone(), channel_obj.clone());
+                        channel_obj
+                    }
+                };
+                tracing::debug!("found/created channel");
+                {
+                    channel_obj.write().await.users.insert(nickname.clone());
+                }
+                tracing::debug!("added user to channel");
+                let channel_name = {
+                    let channel_lock = channel_obj.read().await;
+                    channel_lock.name.clone()
+                };
+                tracing::debug!("Finished updating server state");
+
+                //Send user JOIN message back to the user
+                tracing::debug!("Sending JOIN message to user");
+                let _ = {
+                    let active_session = session.read().await;
+                    active_session
+                    .sender
+                    .send(format!(":{} JOIN {}\r\n", nickname, channel_name))
+                };
+
+                //Send Channel topic value to the user
+                tracing::debug!("Sending channel topic to user");
+                let params = ResponseParams::new(nickname.clone()).channel(channel_name.clone());
+                let response = ResponseCode::RPL_TOPIC.message(params);
+                let _ = {
+                    let active_session = session.read().await;
+                    active_session.sender.send(response)
+                };
+
+                //Send name list to user
+                tracing::debug!("Sending name list to user");
+                let user_list = {
+                    let users = server_state
+                        .channels
+                        .read()
+                        .await
+                        .get(channel_name.as_str())
+                        .unwrap()
+                        .read()
+                        .await
+                        .users
+                        .clone();
+                    users.iter().cloned().collect::<Vec<_>>().join(" ")
+                };
+                tracing::debug!("User list: {}", user_list);
+                let params = ResponseParams::new(nickname.clone())
+                    .channel(channel_name.clone())
+                    .message(user_list);
+                let response = ResponseCode::RPL_NAMREPLY.message(params);
+                let _ = {
+                    let active_session = session.read().await;
+                    active_session.sender.send(response)
+                };
+
+                let params = ResponseParams::new(nickname.clone()).channel(channel_name.clone());
+                let response = ResponseCode::RPL_ENDOFNAMES.message(params);
+                let _ = {
+                    let active_session = session.read().await;
+                    active_session.sender.send(response)
+                };
             }
 
             Command::PRIVMSG(target, message) => {
@@ -152,10 +223,12 @@ impl Command {
                     tracing::debug!("Sending message to channel: {}", target);
                     let recipient_handles: Option<Vec<Arc<RwLock<Client>>>> = {
                         let channels = server_state.channels.read().await;
-                        if let Some(users) = channels.get(target) {
+                        if let Some(channel) = channels.get(target) {
                             let users_lock = server_state.users.read().await;
+                            let channel_lock = channel.read().await;
                             Some(
-                                users
+                                channel_lock
+                                    .users
                                     .iter()
                                     .filter(|user| *user != &nickname)
                                     .filter_map(|user| users_lock.get(user).map(Arc::clone))
@@ -191,12 +264,14 @@ impl Command {
                 let active_session = session.write().await;
                 if let Some(channel) = channel {
                     let channels = server_state.channels.read().await;
-                    if let Some(users) = channels.get(channel) {
+                    if let Some(channel) = channels.get(channel) {
+                        let channel_lock = channel.read().await;
+                        let users = channel_lock.users.clone();
                         let user_list = users.iter().cloned().collect::<Vec<_>>().join(" ");
 
                         let params =
                             ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
-                                .channel(channel.clone())
+                                .channel(channel_lock.name.clone())
                                 .message(user_list.clone());
 
                         let response = ResponseCode::RPL_NAMREPLY.message(params);
@@ -204,15 +279,21 @@ impl Command {
 
                         let params =
                             ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
-                                .channel(channel.clone());
+                                .channel(channel_lock.name.clone());
                         let response = ResponseCode::RPL_ENDOFNAMES.message(params);
                         let _ = active_session.sender.send(response);
                     }
                 } else {
                     let channels = server_state.channels.read().await;
                     for channel in channels.keys() {
-                        let users = channels.get(channel).unwrap();
-                        let user_list = users.iter().cloned().collect::<Vec<_>>().join(" ");
+                        let channel_obj = channels.get(channel).unwrap();
+                        let channel_lock = channel_obj.read().await;
+                        let user_list = channel_lock
+                            .users
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         let params =
                             ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
                                 .channel(channel.clone())

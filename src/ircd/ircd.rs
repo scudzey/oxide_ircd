@@ -1,7 +1,8 @@
+use super::channel::Channel;
 use super::client::Client;
 use super::command::Command;
 use rand::Rng;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -11,19 +12,26 @@ use tracing::instrument;
 #[derive(Debug)]
 pub struct ServerState {
     pub users: RwLock<HashMap<String, Arc<RwLock<Client>>>>,
-    pub channels: RwLock<HashMap<String, HashSet<String>>>,
+    pub channels: RwLock<HashMap<String, Arc<RwLock<Channel>>>>,
 }
 
 impl ServerState {
-    #[instrument]
     pub async fn add_client(&self, nickname: String, client: &Arc<RwLock<Client>>) {
         self.users.write().await.insert(nickname, client.clone());
     }
-    #[instrument]
     pub async fn remove_client(&self, nickname: &str) {
         self.users.write().await.remove(nickname);
     }
-    #[instrument]
+
+    pub async fn add_channel(&self, channel: &Arc<RwLock<Channel>>) {
+        let name = channel.read().await.name.clone();
+        self.channels.write().await.insert(name, channel.clone());
+    }
+
+    pub async fn remove_channel(&self, channel: &str) {
+        self.channels.write().await.remove(channel);
+    }
+
     pub async fn change_nick(&self, old_nick: &str, new_nick: &str) {
         let mut users = self.users.write().await;
         if let Some(client) = users.remove(old_nick) {
@@ -41,8 +49,6 @@ pub type SharedServerState = Arc<ServerState>;
 
 #[instrument]
 pub async fn run(listener: TcpListener) -> Result<(), Box<dyn std::error::Error>> {
-    //let connection_pool = Arc::new(Mutex::new(Vec::new()));
-
     let server_state = Arc::new(ServerState {
         users: RwLock::new(HashMap::new()),
         channels: RwLock::new(HashMap::new()),
