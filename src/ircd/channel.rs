@@ -1,10 +1,14 @@
-use std::collections::HashSet;
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+
+use tokio::sync::RwLock;
+
+use super::client::Client;
 
 #[derive(Debug)]
 pub struct Channel {
     pub name: String,
     pub topic: String,
-    pub users: HashSet<String>,
+    pub users: HashMap<String, Arc<RwLock<Client>>>,
     pub modes: HashSet<String>,
 }
 
@@ -13,7 +17,7 @@ impl Channel {
         Self {
             name,
             topic: String::new(),
-            users: HashSet::new(),
+            users: HashMap::new(),
             modes: HashSet::new(),
         }
     }

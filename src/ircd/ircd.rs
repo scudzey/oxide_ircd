@@ -23,15 +23,6 @@ impl ServerState {
         self.users.write().await.remove(nickname);
     }
 
-    pub async fn add_channel(&self, channel: &Arc<RwLock<Channel>>) {
-        let name = channel.read().await.name.clone();
-        self.channels.write().await.insert(name, channel.clone());
-    }
-
-    pub async fn remove_channel(&self, channel: &str) {
-        self.channels.write().await.remove(channel);
-    }
-
     pub async fn change_nick(&self, old_nick: &str, new_nick: &str) {
         let mut users = self.users.write().await;
         if let Some(client) = users.remove(old_nick) {

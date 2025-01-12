@@ -115,15 +115,46 @@ impl Command {
             Command::NICK(nick) => {
                 tracing::debug!("Changing nickname to: {}", nick);
                 let mut active_session = session.write().await;
-                let old_nick = active_session.nick.as_ref().unwrap();
+                let old_nick = active_session.nick.as_ref().unwrap().clone();
                 let new_nick = nick.clone();
-                server_state.change_nick(old_nick, &new_nick).await;
+                server_state.change_nick(&old_nick, &new_nick).await;
                 tracing::debug!("Finished updating server state");
+
+                //update the references in the channel lists
+                let channels = server_state.channels.read().await;
+                for channel in channels.values() {
+                    let mut channel = channel.write().await;
+                    if channel.users.contains_key(&old_nick) {
+                        let client = channel.users.remove(&old_nick).unwrap();
+                        channel.users.insert(new_nick.clone(), client);
+                    }
+                }
+
                 active_session.nick = Some(nick.clone());
 
                 let _ = active_session
                     .sender
                     .send(format!(":server 001 {} :Welcome!\r\n", nick));
+
+                //send NICK message to all connected users
+                let formatted_message = format!(":{} NICK {}\r\n", old_nick, new_nick);
+                let recipient_handles = {
+                    let users = server_state.users.read().await;
+                    users.keys()
+                        .filter_map(|user| {
+                            if user != &new_nick {
+                                users.get(user).map(Arc::clone)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for handle in recipient_handles {
+                    let client = handle.write().await;
+                    let _ = client.sender.send(formatted_message.clone());
+                }
+                
             }
 
             Command::USER(user) => {
@@ -150,7 +181,7 @@ impl Command {
                 };
                 tracing::debug!("found/created channel");
                 {
-                    channel_obj.write().await.users.insert(nickname.clone());
+                    channel_obj.write().await.users.insert(nickname.clone(), session.clone());
                 }
                 tracing::debug!("added user to channel");
                 let channel_name = {
@@ -190,7 +221,7 @@ impl Command {
                         .await
                         .users
                         .clone();
-                    users.iter().cloned().collect::<Vec<_>>().join(" ")
+                    users.keys().cloned().collect::<Vec<_>>().join(" ")
                 };
                 tracing::debug!("User list: {}", user_list);
                 let params = ResponseParams::new(nickname.clone())
@@ -208,6 +239,28 @@ impl Command {
                     let active_session = session.read().await;
                     active_session.sender.send(response)
                 };
+
+                //Send join message to all connected users of channel
+                tracing::debug!("Sending JOIN message to all users of channel");
+                let formatted_message = format!(":{} JOIN {}\r\n", nickname, channel_name);
+                let recipient_handles = {
+                    let channel_lock = channel_obj.read().await;
+                    let users = channel_lock.users.clone();
+                    let users_lock = server_state.users.read().await;
+                    users.iter()
+                        .filter_map(|(user, _)| {
+                            if user != &nickname {
+                                users_lock.get(user).map(Arc::clone)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for handle in recipient_handles {
+                    let client = handle.write().await;
+                    let _ = client.sender.send(formatted_message.clone());
+                }
             }
 
             Command::PRIVMSG(target, message) => {
@@ -229,7 +282,7 @@ impl Command {
                             Some(
                                 channel_lock
                                     .users
-                                    .iter()
+                                    .keys()
                                     .filter(|user| *user != &nickname)
                                     .filter_map(|user| users_lock.get(user).map(Arc::clone))
                                     .collect::<Vec<_>>(),
@@ -267,7 +320,7 @@ impl Command {
                     if let Some(channel) = channels.get(channel) {
                         let channel_lock = channel.read().await;
                         let users = channel_lock.users.clone();
-                        let user_list = users.iter().cloned().collect::<Vec<_>>().join(" ");
+                        let user_list = users.keys().cloned().collect::<Vec<_>>().join(" ");
 
                         let params =
                             ResponseParams::new(active_session.nick.as_ref().unwrap().clone())
@@ -290,7 +343,7 @@ impl Command {
                         let channel_lock = channel_obj.read().await;
                         let user_list = channel_lock
                             .users
-                            .iter()
+                            .keys()
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(" ");
